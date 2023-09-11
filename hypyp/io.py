@@ -12,6 +12,8 @@ Input/Output (io)
 """
 
 import mne
+import numpy as np
+import os
 import pyxdf
 import warnings
 
@@ -29,11 +31,12 @@ class XDF_IMPORT():
       eeg_montage: A path to a local Dig montage or a mne standard montage 
     """
 
-    def __init__(self, path: str, type: str='EEG', stream_idx: list=None, sfreq: int=None, print_stream_name: bool=True, convert_all_eeg: bool=False, eeg_montage: str=None):
+    def __init__(self, path: str, type: str='EEG', stream_idx: list=None, sfreq: int=None, print_stream_name: bool=True, convert_all_eeg: bool=False, save_FIF_path:bool=None, eeg_montage: str=None):
         
         self.path = path 
         self.sfreq = sfreq
         self.data, self.header = pyxdf.load_xdf(path, verbose=None)
+        self.save_FIF_path = save_FIF_path
         self.eeg_montage = eeg_montage
 
         if print_stream_name==True: 
@@ -120,11 +123,20 @@ class XDF_IMPORT():
             self.get_sampling_freq(i)
             self.create_info(i, type="eeg")
             self.create_raw(i, self.info, bounds=None)
+            
             # Check whether the Raw's name is already used, add an incremental suffix if needed
-            if self.duplicated_name: 
-                self.raw_all['{}-StreamIndex-{}'.format(self.data[i]['info']['name'][0], i)] = self.raw
-            else:
-                self.raw_all[self.data[i]['info']['name'][0]] = self.raw
+            if self.duplicated_name: stream_name = '{}-StreamIndex-{}'.format(self.data[i]['info']['name'][0], i)
+            else: stream_name = self.data[i]['info']['name'][0]
+            
+            # Save the object/stream_name pair in raw_all
+            self.raw_all[stream_name] = self.raw
+
+            # Save file is asked too
+            if self.save_FIF_path is not None: 
+                os.makedirs(self.save_FIF_path, exist_ok=True)
+                self.raw.save(f"{self.save_FIF_path}{stream_name}.fif", overwrite=True)
+                print(f'-> saved {stream_name} at {self.save_FIF_path}')
+
         print("\nConvertion done.")
         
     def find_id(self, type: str = "EEG") -> list:
@@ -206,7 +218,45 @@ class XDF_IMPORT():
             idx: The index of the stream to get the sampling rate from.
         """
         self.sfreq = float (self.data[idx]["info"]["nominal_srate"][0])
-        print ("sampling freq is "+str(self.sfreq)+"Hz")
+        print (f"sampling freq is {self.sfreq} Hz")
+
+    def auto_scale_data(self, data, std_threshold=1e-5, amplitude_threshold=1.0):
+        """
+        Automatically scale EEG data to V if necessary based on both standard deviation and amplitude range.
+
+        Arguments:
+            data: EEG data array.
+            std_threshold: Threshold for standard deviation to determine scaling.
+                           Default is set to 1e-5.
+            amplitude_threshold: Threshold for amplitude range to determine scaling.
+                                 Default is set to 1.0.
+
+        Returns:
+            Scaled EEG data array.
+        """
+        # Check for NaN and Inf values in the data
+
+        data = data.astype(np.float64)
+
+        if np.any(np.isnan(data)) or np.any(np.isinf(data)):
+            print("Data contains NaN or Inf values >> NOT converting to V")
+            return data
+
+        std = data.std()
+        self.dev = data
+
+        amplitude_range = data.max() - data.min()
+
+        if std > std_threshold and amplitude_range > amplitude_threshold:
+            # Data has both a small standard deviation and small amplitude range, indicating it's in mV
+            print(f"Std ({std}) and amplitude range ({amplitude_range}) are larges >> converting to V (e.g., * 10e-6)")
+            scaled_data = data * 10e-6  # Scale to V
+        else:
+            # Data has a large standard deviation or amplitude range, indicating it's already in V
+            print(f"Std ({std}) or amplitude range ({amplitude_range}) are smalls >> NOT converting to V")
+            scaled_data = data
+        
+        return scaled_data
 
     def create_info (self, idx: int, type: str = "eeg"):
         """
@@ -244,7 +294,7 @@ class XDF_IMPORT():
             The `bounds`argument can be used to cut a specific piece of the time series:  
                 - it must be a list of two values,
                 - the first value is the first time point, 
-                - the second value is the last time point included in the sample
+                - the second value is the last time point to include in the sample
         """
 
         # Here we check wether the data is in the correct shape () and transpose it if necessary
@@ -254,16 +304,17 @@ class XDF_IMPORT():
         else: 
             data = self.data[idx]["time_series"]
 
+        # Apply automatic scaling to the data
+        scaled_data = self.auto_scale_data(data)
+        
         # Here we cut the data to convert if the user has given bounds
         if bounds != None:
-            data = data [:,bounds[0]:bounds[1]]
+            data = scaled_data [:,bounds[0]:bounds[1]]
         
         # Create the mne.Raw
-        self.raw = mne.io.RawArray(data, info) 
+        self.raw = mne.io.RawArray(scaled_data, info) 
         
         # Rename channels if the information is available
-        print(self.data[idx]["info"]["desc"])
-        #if bool(self.data[idx]["info"]["desc"][0]["channels"]):
         desc_info = self.data[idx]["info"]["desc"]
         if desc_info and desc_info[0] and "channels" in desc_info[0]:
             self.rename_chs(idx=idx)
@@ -309,4 +360,4 @@ class XDF_IMPORT():
             for eeg_stream in self.raw_all:
                 try: self.raw_all[eeg_stream].set_montage(eeg_montage)
                 except ValueError: raise ValueError(f"Invalid montage given to mne.set_montage(): {eeg_montage}")
-        else: print("No channels information was found. The montage can be set manually/individually by using the MNE funciton set_montage on the mne.Raw objects.")
+        else: print("- No channels information was found. The montage can be set manually/individually by using the MNE funciton set_montage on the mne.Raw objects.")
