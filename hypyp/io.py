@@ -19,23 +19,26 @@ import warnings
 
 class XDF_IMPORT():
     """
-    Read an XDF file and enable to export stream in convinient format (e.g., an EEG stream into a mne.Raw instance).
+    Read an XDF file and enable to export stream in a convenient format (e.g., an EEG stream into an mne.Raw instance).
 
     Arguments:
       path: Path to LSL data (i.e., XDF file). Can be absolute or relative.
       type: Define which type of stream the user is looking to convert.
-      stream_idx: List of the stream index(es) in the XDF the user whish to convert (can be `str` which the class will try to match to the name of an existing stream or an `int` which will be interpreted as such).
+      stream_idx: List of the stream index(es) in the XDF the user wishes to convert (can be `str` which the class will try to match to the name of an existing stream or an `int` which will be interpreted as such).
       sfreq: Sampling frequency, can either be set given by the user or automatically by the class.
-      print_stream_name: Wheather the class should print the streams and their respective index in the XDF.
-      convert_all_eeg: Boolean indicating if the class must automaticaly convert all EEG stream(s) it finds (when set to True).
-      eeg_montage: A path to a local Dig montage or a mne standard montage 
+      print_stream_name: Whether the class should print the streams and their respective index in the XDF.
+      convert_all_eeg: Boolean indicating if the class must automatically convert all EEG stream(s) it finds (when set to True).
+      eeg_montage: A path to a local Dig montage or a mne standard montage.
+      scale: Scaling factor or 'auto' for automatic scaling, None for no scaling.
+      save_FIF_path: Boolean indicating whether to save the converted data to FIF format.
     """
 
-    def __init__(self, path: str, type: str='EEG', stream_idx: list=None, sfreq: int=None, print_stream_name: bool=True, convert_all_eeg: bool=False, save_FIF_path:bool=None, eeg_montage: str=None):
+    def __init__(self, path: str, type: str='EEG', stream_idx: list=None, sfreq: int=None, print_stream_name: bool=True, convert_all_eeg: bool=False, eeg_montage: str=None, scale=None, save_FIF_path: bool=None):
         
         self.path = path 
         self.sfreq = sfreq
         self.data, self.header = pyxdf.load_xdf(path, verbose=None)
+        self.scale = scale
         self.save_FIF_path = save_FIF_path
         self.eeg_montage = eeg_montage
 
@@ -218,9 +221,9 @@ class XDF_IMPORT():
             idx: The index of the stream to get the sampling rate from.
         """
         self.sfreq = float (self.data[idx]["info"]["nominal_srate"][0])
-        print (f"sampling freq is {self.sfreq} Hz")
+        print (f"- Sampling freq is {self.sfreq} Hz")
 
-    def auto_scale_data(self, data, std_threshold=1e-5, amplitude_threshold=1.0):
+    def scale_data(self, data, std_threshold=1e-5, amplitude_threshold=1.0):
         """
         Automatically scale EEG data to V if necessary based on both standard deviation and amplitude range.
 
@@ -234,30 +237,44 @@ class XDF_IMPORT():
         Returns:
             Scaled EEG data array.
         """
+        
         # Check for NaN and Inf values in the data
-
         data = data.astype(np.float64)
 
         if np.any(np.isnan(data)) or np.any(np.isinf(data)):
-            print("Data contains NaN or Inf values >> NOT converting to V")
+            print("Data contains NaN or Inf values: No convertion will be done")
             return data
 
         std = data.std()
-        self.dev = data
+        self.dev = data # to remove #
 
-        amplitude_range = data.max() - data.min()
+        if self.scale=='auto':
+            amplitude_range = data.max() - data.min()
 
-        if std > std_threshold and amplitude_range > amplitude_threshold:
-            # Data has both a small standard deviation and small amplitude range, indicating it's in mV
-            print(f"Std ({std}) and amplitude range ({amplitude_range}) are larges >> converting to V (e.g., * 10e-6)")
-            scaled_data = data * 10e-6  # Scale to V
-        else:
-            # Data has a large standard deviation or amplitude range, indicating it's already in V
-            print(f"Std ({std}) or amplitude range ({amplitude_range}) are smalls >> NOT converting to V")
-            scaled_data = data
+            if std > std_threshold and amplitude_range > amplitude_threshold:
+                # Data has both a small standard deviation and small amplitude range, indicating it's in mV
+                print(f"- Std ({std}) and amplitude range ({amplitude_range}) are larges >> converting to V (e.g., * 10e-6)")
+                scaled_data = data * 10e-6  # Scale to V
+            else:
+                # Data has a large standard deviation or amplitude range, indicating it's already in V
+                print(f"Std ({std}) or amplitude range ({amplitude_range}) are smalls >> NOT converting to V")
+                scaled_data = data
+            
+            return scaled_data
         
-        return scaled_data
+        elif isinstance(self.scale, (int, float)):
+            print(f"- Returning the data scaled with {self.scale}")
+            return data * self.scale
+        
+        elif self.scale==None:
+            print("- Returning the data with no transformation, user input is 'None'")
+            return data
 
+        else:
+            print("- Returning the data with no transformation, user input is not ('auto', a scalar, or 'None')")
+            return data
+    
+    
     def create_info (self, idx: int, type: str = "eeg"):
         """
         Create a mne.info object from the XDF's EEG stream metadata.
@@ -305,7 +322,7 @@ class XDF_IMPORT():
             data = self.data[idx]["time_series"]
 
         # Apply automatic scaling to the data
-        scaled_data = self.auto_scale_data(data)
+        scaled_data = self.scale_data(data)
         
         # Here we cut the data to convert if the user has given bounds
         if bounds != None:
